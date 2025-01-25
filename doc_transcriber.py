@@ -43,10 +43,10 @@ logger.setLevel(logging.DEBUG)
 class Pipe:
     """Pipe class handles the processing of a message or a file uploaded to the chatbot interface."""
 
-    class Valves(BaseModel):
+    class UserValves(BaseModel):
         """UserValves class contains the valves for the user."""
         MODEL_ID: str = Field(default="llama3.2-vision:latest")
-        STREAM: bool = Field(default=True)
+        STREAM: bool = Field(default=False)
         SYSTEM_PROMPT: str = Field(default="You are a file transcriber. You will carefully analyze and transcribe text within an image or file and respond with the verbatim transcription formatted with markdown. If there is no text within the image or file, provide a brief description of what is within the image or file. Do not respond with any additional text or summaries.")
         PROMPT: str = Field(default="Transcribe the text in the image or file and respond with a verbatim transcription.")
         TEMPERATURE: float = Field(default=0.7)
@@ -60,24 +60,11 @@ class Pipe:
         PNG_DIR: str = Field(default=DATA_DIR, description="The directory to use when saving the PNG images. A sub-directory will be created for each downloaded file that will contain the png files.")
     
 
-
     def __init__(self):
         """Initializes the Pipe class by setting the valves."""
-        self.valves = self.Valves()
+        self.valves = self.UserValves()
 
-    async def on_startup(self):
-        """This function is called when the server is started."""
-        print("on_startup: doc_transcriber")
-
-    async def on_shutdown(self):
-        """This function is called when the server is stopped."""
-        print("on_shutdown: doc_transcriber")
-
-    async def on_valves_updated(self):
-        """This function is called when the valves are updated."""
-        print("on_valves_updated: doc_transcriber")
-
-    async def pipe(self, body: dict, __user__: dict, __request__: Request, __event_emitter__=None, __event_call__=None):
+    async def pipe(self, body: dict, __user__: dict, __request__: Request, __event_emitter__=None, __event_call__=None, __files__=None):
         """
         Processes the last user message and handles user action. This function must be named "pipe" for open-webui to process it.
 
@@ -89,6 +76,9 @@ class Pipe:
         Returns:
             None
         """
+        # Get the current UserValves state from the __user__ dictionary
+        self.valves = __user__['valves']
+        
         @staticmethod
         async def update_status(message: str, __event_emitter__=None, done: bool = False):
             """
@@ -502,15 +492,17 @@ class Pipe:
                     # Page 2: Transcription Text
                     # ---------------------------
                     pdf.add_page()
+                    # Set font to Unicode font
                     pdf.set_font("Arial", size=12)
                     # Start writing the text from x=50, y=50
                     pdf.set_xy(50, 50)
+                    pdf.set_margin(30)
 
                     # For multi-line text, use multi_cell.
                     # The first two arguments are cell width and height.
                     pdf.multi_cell(
-                        w=500,              # Adjust width to your liking
-                        h=18,               # Line height in points
+                        w=500,              # Adjust width to your liking   
+                        h=12,               # Adjust height to your liking
                         txt=transcription_text
                     )
 
@@ -520,9 +512,63 @@ class Pipe:
             except Exception as e:
                 logger.error(f"Error creating PDF: {e}")
                 return e
-            
+
+        @staticmethod
+        def print_element(element, indent=0, slice_length=50):
+            """
+            Recursively prints elements. If it's a list or dict, drill down.
+            Otherwise, slice if it's a long string.
+            """
+            prefix = " " * indent  # indentation for structured printing
+
+            if isinstance(element, str):
+                # Truncate if needed
+                text = element if len(element) <= slice_length else element[:slice_length] + "..."
+                print(f"{prefix}- (string) {text}")
+
+            elif isinstance(element, list):
+                print(f"{prefix}- (list) [")
+                for i, sub_item in enumerate(element):
+                    print(f"{prefix}  [{i}] ", end="")
+                    print_element(sub_item, indent=indent + 4, slice_length=slice_length)
+                print(f"{prefix}]")
+
+            elif isinstance(element, dict):
+                print(f"{prefix}- (dict) {{")
+                for k, v in element.items():
+                    print(f"{prefix}  '{k}': ", end="")
+                    print_element(v, indent=indent + 4, slice_length=slice_length)
+                print(f"{prefix}}}")
+
+            else:
+                # Fallback for int, float, bool, None, etc.
+                val_str = str(element)
+                if len(val_str) > slice_length:
+                    val_str = val_str[:slice_length] + "..."
+                print(f"{prefix}- (other) {val_str}")
+
+        @staticmethod
+        def print_sliced_array_recursive(elements, slice_length=50):
+            """
+            Iterates over a list of elements (any type) and prints them recursively.
+            """
+            for idx, item in enumerate(elements):
+                print(f"Index {idx}:")
+                print_element(item, indent=4, slice_length=slice_length)
+                print()  # Blank line after each top-level item
+
+
+  
 
         #BEGIN PIPELINE 
+
+        files = __files__ or []
+        # if files:
+        #     print_sliced_array_recursive(files)
+        #     return "Printed __files__"
+        
+        # print_sliced_array_recursive(body['messages'])
+        # return "Done"
 
         logger.debug(f"Pipe Valves: {self.valves.__dict__}")
 
@@ -550,16 +596,31 @@ class Pipe:
                         logger.debug(f"User Action Input: {user_action_input}")
                         if user_action_input.startswith("http") or user_action_input.startswith("https"):
                             doc_url = True
+                    
+                     # Check attached files
+                    attached_files_paths = []
+                    if files:
+                        for file in files:
+                            file_path = Files.get_file_by_id(file['file']['id']).path
+                            if file_path:
+                                attached_files_paths.append(file_path)
+                        if len(attached_files_paths) > 0:
+                            logger.debug(f"Attached files paths: {attached_files_paths}")
+                            doc_url = True
 
                     if doc_url:
                         await update_status("Resolving document URL...", __event_emitter__)
-                        # Check if we have already downloaded the file
-                        existing_file = check_existing_file(user_action_input)
-                        google_link = user_action_input.startswith("https://drive.google.com")
-                        if google_link:
-                            await update_status("Downloading Google Drive file...", __event_emitter__)
-                            file_id = extract_google_drive_id(user_action_input)
-                            existing_file = check_google_file_already_downloaded(file_id)
+                        # Use the first attached file if available. TODO: Add support for multiple files
+                        if attached_files_paths:
+                            existing_file = attached_files_paths[0]
+                        else:
+                            # Check if we have already downloaded the file
+                            existing_file = check_existing_file(user_action_input)
+                            google_link = user_action_input.startswith("https://drive.google.com")
+                            if google_link:
+                                await update_status("Downloading Google Drive file...", __event_emitter__)
+                                file_id = extract_google_drive_id(user_action_input)
+                                existing_file = check_google_file_already_downloaded(file_id)
 
                         if not existing_file == False:
                             await update_status(f"File already exists...{existing_file}", __event_emitter__)
