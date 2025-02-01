@@ -2,9 +2,9 @@
 title: Document Optical Reconstruction Kit (DORK)
 author: Sawyer Borror <sawyerksu@gmail.com>
 author_url: https://github.com/thesawdawg/open-webui-docAI.git
-version: 2.1
+version: 2.3
 license: MIT
-Dependencies: pydantic, open_webui, urllib3, pypdf, pdf2image, pillow
+Dependencies: open_webui, pdf2image
 """
 from pydantic import BaseModel, Field
 import logging
@@ -36,6 +36,7 @@ import uuid
 from io import BytesIO
 from typing import List, Union
 import random
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 # Configure logger to output to stdout
@@ -87,6 +88,21 @@ class Pipe:
         """
         # Get the current UserValves state from the __user__ dictionary
         self.user_valves = __user__['valves']
+
+        # Default custom text commands.
+        # This will be the response if we dont have any tasks available to process
+        # The commands will be options the user may input to trigger specific actions
+        GLOBAL_DEFAULT_RESPONSE = f"""
+
+        **Welcome to the Document Optical Reconstruction Kit (DORK)**
+        The input you provided was not recognized as a valid command.
+
+        *Available commands*:
+        - /chat [message]
+            - Send a message to the chatbot. Nothing fancy, just simple chat.
+        
+        """
+
         
 
         # Ensure our directories exist
@@ -174,7 +190,7 @@ class Pipe:
                     )
 
         @staticmethod
-        def download_file(url, output_folder=self.valves.DOWNLOAD_DIR):
+        def download_file(url, output_folder=None):
             """
             Downloads a file from the given URL and saves it to the given output folder.
 
@@ -185,7 +201,8 @@ class Pipe:
             Returns:
                 str: The path to the downloaded file.
             """
-            os.makedirs(output_folder, exist_ok=True)
+            output_folder = output_folder or self.valves.DOWNLOAD_DIR
+            Path(output_folder).mkdir(parents=True, exist_ok=True)
             if "drive.google.com" in url:
                 file_id = extract_google_drive_id(url)
                 if not file_id:
@@ -199,12 +216,12 @@ class Pipe:
             filename = get_filename_from_url_or_headers(url, response.headers)
             if not filename:
                 raise Exception("Unable to determine the filename")
-            file_path = os.path.join(output_folder, filename)
+            file_path = Path(output_folder) / filename
             with open(file_path, "wb") as file:
                 for chunk in response.iter_content(chunk_size=8192):
                     file.write(chunk)
             print(f"File downloaded successfully: {file_path}")
-            return file_path
+            return str(file_path)
 
         @staticmethod
         def extract_google_drive_id(url):
@@ -235,12 +252,12 @@ class Pipe:
                 output_folder (str): The folder to save the downloaded file in.
 
             Returns:
-                str: The path to the downloaded file.
+                str or False: The file path if the file already exists, False otherwise.
             """
-            file_path = os.path.join(output_folder, f"{file_id}.pdf")
-            if os.path.isfile(file_path):
+            file_path = Path(output_folder) / f"{file_id}.pdf"
+            if file_path.exists():
                 print(f"File already downloaded: {file_path}")
-                return file_path
+                return str(file_path)
             return False
 
         @staticmethod
@@ -285,7 +302,7 @@ class Pipe:
 
                 # The filename often appears in the Content-Disposition header
                 content_disp = r.headers.get("Content-Disposition", "")
-                # e.g.: 'attachment; filename="example.pdf"; filename*=UTF-8\'\'example.pdf'
+                # e.g.: 'attachment; filename="example.pdf"; filename*=UTF-8''example.pdf'
 
                 # First try to get filename from Content-Disposition header
                 m = re.search(r'filename="([^"]+)"', content_disp)
@@ -296,7 +313,7 @@ class Pipe:
                 # If that fails, try to get filename from URL path
                 path = urlparse(url).path
                 if path:
-                    filename = os.path.basename(path)
+                    filename = Path(path).name
                     if filename:
                         return filename
 
@@ -340,7 +357,7 @@ class Pipe:
             Returns:
                 list: A list of paths to the saved PNG images.
             """
-            os.makedirs(output_folder, exist_ok=True)
+            Path(output_folder).mkdir(parents=True, exist_ok=True)
 
             # 1) Get the total number of pages in the PDF
             info = pdfinfo_from_path(pdf_path)
@@ -363,12 +380,12 @@ class Pipe:
                 )
                 
                 for idx, image in enumerate(page_images, start=current_page):
-                    page_path = os.path.join(output_folder, f"page_{idx}.png")
+                    page_path = Path(output_folder) / f"page_{idx}.png"
                     image.save(page_path, "PNG")
                     await update_status(
                         f"Converted page {idx}/{total_pages}...", __event_emitter__
                     )
-                    page_paths.append(page_path)
+                    page_paths.append(str(page_path))
 
                 current_page += chunk_size  # move to the next chunk
 
@@ -387,9 +404,9 @@ class Pipe:
                 str: The path to the converted PNG file.
             """
             image = Image.open(image_path)
-            png_path = os.path.splitext(os.path.join(self.valves.PNG_DIR, os.path.basename(image_path))) + os.path.splitext(image_path)[0] + ".png"
+            png_path = Path(self.valves.PNG_DIR) / (Path(image_path).stem + ".png")
             image.save(png_path, "PNG")
-            return png_path
+            return str(png_path)
         @staticmethod
         def is_image(file_path):
             """
@@ -401,17 +418,7 @@ class Pipe:
             Returns:
                 bool: True if the file is an image, False otherwise.
             """
-            try:
-                with open(file_path, "rb") as file:
-                    image = Image.open(file)
-                    image.verify()
-                    # Check if filetype is supported
-                    if image.format.lower() in ['png', 'jpg', 'jpeg', 'tiff']:
-                        return True
-                return False
-            except Exception as e:
-                logger.error(f"Error checking image: {file_path}\nError Message:{e}")
-                return False
+            return Path(file_path).suffix.lower() in {'.png', '.jpg', '.jpeg', '.tiff'}
 
         @staticmethod
         def check_existing_file(filename):
@@ -425,14 +432,15 @@ class Pipe:
                 str or False: The file path if the file already exists, False otherwise.
             """
             try:
-                if os.path.exists(os.path.join(UPLOAD_DIR, filename)):
+                file_path = Path(UPLOAD_DIR) / filename
+                if file_path.exists():
                     logger.debug(f"File exists. Returning file path. {UPLOAD_DIR}/{filename}")
-                    return os.path.join(UPLOAD_DIR, filename)
+                    return str(file_path)
                 logger.debug(f"File does not exist. Returning False.")
                 return False
             except Exception as e:
                 logger.error(f"Error checking file: {file_url}\nError Message:{e}")
-                return False
+                return None
 
         @staticmethod
         def convert_image_to_base64(image_path):
@@ -527,6 +535,8 @@ class Pipe:
                     '¾': '3/4',  # three quarters
                 }
 
+                page_width = pdf.w - 2 * pdf.l_margin
+
                 for item in items_sorted:
                     png_path = item["png_file_path"]
                     transcription_text = item["transcription_text"]
@@ -536,16 +546,19 @@ class Pipe:
                         transcription_text = transcription_text.replace(old, new)
                     
                     # Remove any remaining non-ASCII characters
-                    transcription_text = ''.join(char if ord(char) < 128 else ' ' for char in transcription_text)
+                    transcription_text = ''.join(char if ord(char) < 128 else '' for char in transcription_text)
 
                     # ------------------
                     # Page 1: PNG image
                     # ------------------
                     pdf.add_page()
 
-                    # Insert the image at some position, e.g., x=50, y=50
-                    pdf.image(png_path, x=50, y=50, w=400)
-                    pdf.cell(0, 20, f"Page {item['page_number']} for: {png_path}", ln=True)
+                    # Center the image on the page
+                    image_width = 400
+                    image_x = (pdf.w - image_width) / 2
+                    image_y = (pdf.h - image_width) / 2
+                    pdf.image(png_path, x=image_x, y=image_y, w=image_width)
+                    pdf.multi_cell(page_width, 20, f"Page {item['page_number']} for: {png_path}")
 
                     # ---------------------------
                     # Page 2: Transcription Text
@@ -553,16 +566,16 @@ class Pipe:
                     pdf.add_page()
                     
                     # Start writing the text from x=50, y=50
-                    pdf.set_xy(50, 50)
+                    pdf.set_xy(30, 30)
                     pdf.set_margin(30)
                     
-                    pdf.cell(0, 20, f"Page {item['page_number']} for: {png_path}", ln=True)
+                    pdf.multi_cell(page_width, 20, f"Page {item['page_number']} for: {png_path}")
 
                     # For multi-line text, use multi_cell
                     pdf.multi_cell(
-                        w=500,              # Adjust width to your liking   
-                        h=12,               # Adjust height to your liking
-                        txt=transcription_text
+                        page_width - 60,  # Adjust width to account for margins  
+                        12,               # Adjust height to your liking
+                        transcription_text
                     )
 
                 # Finally, save the PDF
@@ -641,14 +654,14 @@ class Pipe:
             supported_formats = ['png', 'jpg', 'jpeg']
 
             input_path = image_path
-            image_name = os.path.basename(input_path[0])
-            output_path = os.path.join(self.valves.PNG_DIR, image_name + ".png")
+            image_name = Path(input_path).name
+            output_path = Path(self.valves.PNG_DIR) / (image_name + ".png")
 
             with Image.open(input_path) as img:
                 # Save the image as a PNG
                 img.save(output_path, format='PNG')
 
-            return output_path
+            return str(output_path)
         
         @staticmethod
         def generate_chat_form(image_path: str):
@@ -707,20 +720,20 @@ class Pipe:
             If not, converts it. Returns a list of PNG file paths.
             """
             # Extract only the first part of the base name before any extension
-            base_name = os.path.splitext(os.path.basename(file_path))[0]
-            target_dir = os.path.join(png_dir, base_name)
-            os.makedirs(target_dir, exist_ok=True)
+            base_name = Path(file_path).stem
+            target_dir = Path(png_dir) / base_name
+            target_dir.mkdir(parents=True, exist_ok=True)
 
-            existing_pngs = os.listdir(target_dir)
+            existing_pngs = [str(p) for p in target_dir.glob("*.png")]
             if existing_pngs:
                 # Already converted
                 logger.debug(f"PDF already converted in {target_dir}")
-                return [os.path.join(target_dir, png) for png in existing_pngs]
+                return existing_pngs
 
             # Not converted yet
             logger.debug(f"Converting PDF to PNG: {file_path}")
             await update_status("Converting File...", __event_emitter__)
-            new_pngs = await convert_pdf_to_pngs(file_path, __event_emitter__, target_dir)
+            new_pngs = await convert_pdf_to_pngs(file_path, __event_emitter__, str(target_dir))
             return new_pngs
 
         @staticmethod
@@ -765,7 +778,7 @@ class Pipe:
                 return [clean_png]
             else:
                 # Unsupported file type
-                filename = os.path.basename(file_path)
+                filename = Path(file_path).name
                 error_msg = f"What type of file are you trying to convert? I don’t know what to do with {filename}."
                 return error_msg
 
@@ -838,22 +851,22 @@ class Pipe:
                 
                 if is_pdf(file_path):
                     # Convert or retrieve PDF
-                    base_name = os.path.basename(file_path)
-                    target_dir = os.path.join(png_dir, base_name)
-                    os.makedirs(target_dir, exist_ok=True)
+                    base_name = Path(file_path).stem
+                    target_dir = Path(png_dir) / base_name
+                    target_dir.mkdir(parents=True, exist_ok=True)
 
-                    existing_pngs = os.listdir(target_dir)
+                    existing_pngs = [str(p) for p in target_dir.glob("*.png")]
                     if existing_pngs:
-                        png_files.extend([os.path.join(target_dir, f) for f in existing_pngs])
+                        png_files.extend(existing_pngs)
                     else:
-                        new_pngs = await convert_pdf_to_pngs(file_path, __event_emitter__, target_dir)
+                        new_pngs = await convert_pdf_to_pngs(file_path, __event_emitter__, str(target_dir))
                         png_files.extend(new_pngs)
                 elif is_image(file_path):
                     # Convert or just take the existing image
                     clean_png = convert_unsupported_image(file_path)
                     png_files.append(clean_png)
                 else:
-                    filename = os.path.basename(file_path)
+                    filename = Path(file_path).name
                     err = f"What type of file are you trying to convert? I don’t know what to do with {filename}."
                     return err
 
@@ -873,7 +886,7 @@ class Pipe:
             png_files = []
             for image in task["data"]["images"]:
                 image_filename = f"{random.randint(1, 1000)}image.png"
-                output_path = os.path.join(png_dir, image_filename)
+                output_path = Path(png_dir) / image_filename
                 try:
                     # If the string includes a prefix like "data:image/png;base64,", remove it:
                     # (Only do this if you're sure such a prefix exists.)
@@ -888,7 +901,7 @@ class Pipe:
                         f.write(image_data)
                     
                     logger.debug(f"Processed image: {output_path}")
-                    png_files.append(output_path)
+                    png_files.append(str(output_path))
                 except Exception as e:
                     err = f"Failed to process image: {e}"
                     logger.error(err)
@@ -937,7 +950,7 @@ class Pipe:
                 file_path = Files.get_file_by_id(file['file']['id']).path
                 if file_path:
                         # Extract the file type from the file path
-                        file_type = file_path.split('.')[-1]
+                        file_type = Path(file_path).suffix
                         attached_files.append(
                             {
                                 "path": file_path,
@@ -987,28 +1000,26 @@ class Pipe:
                     })
             # 4. TODO: add custom commands list extended functionality
 
+            new_user_input = None
             # Check if we have any tasks
-            if len(tasks) == 0:
+            if len(tasks) == 0 and last_user_message is not None and isinstance(last_user_message, str):
                 # We couldnt figure out any tasks to perform. Lets ask the user to try again through an action input
-                new_user_input = await action(
-                    __event_call__,
-                    "Enter a Web Address",
-                    "I could not figure out what you meant. Please try again. Please paste the URL to your file/image here.",
-                    "input",
-                    "Enter your url..."
-                )
-                if not new_user_input:
-                    # User canceled action
-                    return
-                else:
-                    if not new_user_input.startswith("http") and not new_user_input.startswith("https"):
+                # new_user_input = await action(
+                #     __event_call__,
+                #     "Enter a Web Address",
+                #     "I could not figure out what you meant. Please try again. Please paste the URL to your file/image here.",
+                #     "input",
+                #     "Enter your url..."
+                # )
+
+                    if not last_user_message.startswith("http") and not last_user_message.startswith("https"):
                         # User entered a non URL string. Try again
-                        return "Invalid URL...Please try again."
+                        return "Invalid URL...Please try again.\n\n" + GLOBAL_DEFAULT_RESPONSE 
                     else:
                         tasks.append({
                             "type": "url",
                             "data": {
-                                "url": new_user_input
+                                "url": last_user_message
                             }
                         })
 
@@ -1077,7 +1088,7 @@ class Pipe:
                 for page in selected_pages:
 
                     page_path = sorted_png_files[page - 1]
-                    if not os.path.exists(page_path):
+                    if not Path(page_path).exists():
                         await update_status(f"Page: {page} does not exist at {page_path}. Skipping...", __event_emitter__, True)
                         logger.info(f"Page {page} does not exist at {page_path}. Skipping...")
                         continue
@@ -1138,9 +1149,9 @@ class Pipe:
                     # Extract "transcription" and "png_file_path" field from llm_responses
                     data = [{"transcription_text": response["transcription"], "png_file_path": response["png_file_path"], "page_number": response["page"]} for response in llm_responses]
                     # Generate a new PDF combining the pngs and model transcriptions
-                    doc_title = os.path.splitext(os.path.basename(png_files[0]))[0]
-                    output_path = os.path.join(self.valves.PNG_DIR, doc_title + "_transcription.pdf")
-                    new_pdf_doc = gen_combined_pdf(data,output_path)
+                    doc_title = Path(png_files[0]).stem
+                    output_path = Path(self.valves.PNG_DIR) / (doc_title + "_transcription.pdf")
+                    new_pdf_doc = gen_combined_pdf(data, str(output_path))
                     # Save the PDF
                     try:
                         # generate a guid for the file
@@ -1150,7 +1161,7 @@ class Pipe:
                             form_data = FileForm(
                                 id=str(doc_id),
                                 filename=doc_title + ".pdf",
-                                path=output_path,
+                                path=str(output_path),
                                 data={},
                                 meta={}
                             )
