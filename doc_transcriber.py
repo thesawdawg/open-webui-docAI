@@ -4,7 +4,7 @@ author: Sawyer Borror <sawyerksu@gmail.com>
 author_url: https://github.com/thesawdawg/open-webui-docAI.git
 version: 2.7
 license: MIT
-Dependencies: open_webui, pdf2image
+requirements: pdf2image
 """
 from pydantic import BaseModel, Field
 import logging
